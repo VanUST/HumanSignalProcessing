@@ -1,0 +1,40 @@
+{
+ "appInfo": {
+  "clientName": "Chimera",
+  "clientVersion": "v1.5.0-363b787d7 (Release - 2024-07-11T15:52:57Z)",
+  "operatingSystem": "Windows",
+  "processId": 7868
+ },
+ "sessionInfo": {
+  "capsuleSessionId": "6141aa72-387a-438a-befb-d1b636ead524",
+  "endUTCUnixTimestamp": 1724772377651808,
+  "nfbFunctions": [
+   "alpha",
+   "beta",
+   "theta"
+  ],
+  "startUTCUnixTimestamp": 1724771767044205
+ },
+ "deviceInfo": {
+  "channelNames": [
+   "A1",
+   "C3",
+   "C4",
+   "A2"
+  ],
+  "description": {
+   "Actual name": "Headphone",
+   "Address": "830513",
+   "Battery charge": 100,
+   "Firmware version": "4.8.4",
+   "Is connected": true,
+   "Serial": "830513"
+  },
+  "deviceType": 2,
+  "numChannels": 4,
+  "sampleRate": 250.0
+ },
+ "capsuleInfo": {
+  "version": "v1.5.0-363b787d7 (Release - 2024-07-11T15:52:57Z)"
+ }
+}
