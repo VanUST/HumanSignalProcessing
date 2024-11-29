@@ -6,9 +6,17 @@ import ptwt
 import torchmetrics
 import lightning as L
 
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import ptwt  # PyTorch Wavelet Transform library
+import torchmetrics
+import lightning as L
+
 class WaveletCNN(nn.Module):
     def __init__(self, num_classes, wavelet_type='haar', wavelet_level=2,
-                 conv_channels=[8], kernel_sizes=[3], num_conv_layers=1, token_len=1):
+                 conv_channels=8, kernel_size=3, num_conv_layers=1, 
+                 token_len=1, dropout=0.5, in_channels=1):
         """
         Initializes the WaveletCNN model with configurable wavelet and convolutional parameters.
 
@@ -16,13 +24,12 @@ class WaveletCNN(nn.Module):
             num_classes (int): Number of output classes for classification.
             wavelet_type (str): Type of wavelet to use (e.g., 'haar', 'db1', 'sym2'). Default is 'haar'.
             wavelet_level (int): Level of wavelet decomposition. Default is 2.
-            conv_channels (list of int): List specifying the number of output channels
-                                         for each convolutional layer in the pipelines.
-                                         Length should match num_conv_layers.
-            kernel_sizes (list of int): List specifying the kernel size for each
-                                        convolutional layer. Length should match num_conv_layers.
+            conv_channels (int): Number of output channels for each convolutional layer.
+            kernel_size (int): Kernel size for each convolutional layer.
             num_conv_layers (int): Number of convolutional layers in each convolutional pipeline.
             token_len (int): Length of the token after adaptive pooling.
+            dropout (float): Dropout probability.
+            in_channels (int): Number of input channels (e.g., 1 for grayscale images).
         """
         super(WaveletCNN, self).__init__()
         self.num_classes = num_classes
@@ -30,7 +37,10 @@ class WaveletCNN(nn.Module):
         self.wavelet_type = wavelet_type
         self.num_conv_layers = num_conv_layers
         self.token_len = token_len
+        self.in_channels = in_channels
+        self.dropout_prob = dropout
 
+        self.instance_norm = nn.InstanceNorm1d(in_channels)
 
         # Create convolutional pipelines for each wavelet coefficient tensor
         # Number of pipelines = 1 (cA_J) + J (cD_j for j=1 to J)
@@ -38,21 +48,22 @@ class WaveletCNN(nn.Module):
         self.conv_pipelines = nn.ModuleList()
         for _ in range(self.num_pipelines):
             layers = []
-            in_channels = 1  # Assuming input has 1 channel
-            for out_channels, kernel_size in zip(conv_channels, kernel_sizes):
-                layers.append(nn.Conv1d(in_channels, out_channels, kernel_size, padding=kernel_size//2))
-                layers.append(nn.BatchNorm1d(out_channels))
+            in_channels = self.in_channels  # Assuming input has 1 channel
+            for _ in range(self.num_conv_layers):
+                layers.append(nn.Conv1d(in_channels, conv_channels, kernel_size, padding=kernel_size//2))
+                layers.append(nn.BatchNorm1d(conv_channels))
                 layers.append(nn.LeakyReLU())
                 layers.append(nn.MaxPool1d(kernel_size=2))
-                in_channels = out_channels  # Update for next layer
+                layers.append(nn.Dropout1d(self.dropout_prob))
+                in_channels = conv_channels  # Update for next layer
             self.conv_pipelines.append(nn.Sequential(*layers))
 
         # Adaptive pooling to ensure fixed output size regardless of input size
         self.global_pool = nn.AdaptiveAvgPool1d(self.token_len)  # Outputs (batch_size, channels, token_len)
 
         # Calculate the total number of features after concatenation
-        # Each pipeline outputs conv_channels[-1] features after pooling
-        total_features = conv_channels[-1] * self.num_pipelines * self.token_len
+        # Each pipeline outputs conv_channels features after pooling
+        total_features = conv_channels * self.num_pipelines * self.token_len
 
         # Final fully connected layer
         self.fc = nn.Linear(total_features, num_classes)
@@ -67,6 +78,7 @@ class WaveletCNN(nn.Module):
         Returns:
             torch.Tensor: Logits for each class of shape (batch_size, num_classes).
         """
+        x = self.instance_norm(x)
         # Ensure input is even-length as required by ptwt
         if x.size(-1) % (2 ** self.level) != 0:
             new_size = (x.size(-1) // (2 ** self.level)) * (2 ** self.level)
@@ -81,7 +93,6 @@ class WaveletCNN(nn.Module):
 
         # Process approximation and detail coefficients
         for idx, coeff in enumerate(coefficients):
-            # coeff is of shape (batch_size,1, length)
             # Pass through the corresponding convolutional pipeline
             out = self.conv_pipelines[idx](coeff)
             out = self.global_pool(out)  # (batch_size, channels, token_len)
@@ -98,25 +109,6 @@ class WaveletCNN(nn.Module):
 
         return logits
 
-    def crop_tensor(self, tensor, expected_size):
-        """
-        Crops the tensor along the last dimension to the expected size.
-        If the tensor is larger, it is cropped. If smaller, it is padded with zeros.
-
-        Args:
-            tensor (torch.Tensor): Input tensor of shape (batch_size, channels, length).
-            expected_size (int): Desired size of the last dimension.
-
-        Returns:
-            torch.Tensor: Tensor cropped or padded to the expected size.
-        """
-        current_size = tensor.size(-1)
-        if current_size > expected_size:
-            tensor = tensor[:, :, :expected_size]
-        elif current_size < expected_size:
-            padding = expected_size - current_size
-            tensor = F.pad(tensor, (0, padding))
-        return tensor
 
 class WaveletClassifier(L.LightningModule):
     def __init__(self,
@@ -177,8 +169,9 @@ class WaveletClassifier(L.LightningModule):
         Returns:
             torch.Tensor: Training loss.
         """
-        labels, timeseries = batch
-        logits = self(timeseries.unsqueeze(1))
+        timeseries,labels = batch
+
+        logits = self(timeseries)
 
         loss = self.criterion(logits, labels)
         preds = torch.argmax(logits, dim=1)
@@ -190,7 +183,7 @@ class WaveletClassifier(L.LightningModule):
         self.train_recall(preds, labels_id )
 
         # Log metrics
-        self.log('train_loss', loss)
+        self.log('train_loss', loss, on_step=False, on_epoch=True)
         self.log('train_acc', self.train_accuracy, on_step=False, on_epoch=True)
         self.log('train_precision', self.train_precision, on_step=False, on_epoch=True)
         self.log('train_recall', self.train_recall, on_step=False, on_epoch=True)
@@ -205,8 +198,8 @@ class WaveletClassifier(L.LightningModule):
             batch (tuple): Tuple containing (one_hot_labels, timeseries).
             batch_idx (int): Batch index.
         """
-        labels, timeseries = batch
-        logits = self(timeseries.unsqueeze(1))
+        timeseries,labels = batch
+        logits = self(timeseries)
 
         loss = self.criterion(logits, labels)
 
@@ -219,7 +212,7 @@ class WaveletClassifier(L.LightningModule):
         self.val_recall(preds, labels_id)
 
         # Log metrics
-        self.log('val_loss', loss,prog_bar=True)
+        self.log('val_loss', loss,prog_bar=True, on_step=False, on_epoch=True)
         self.log('val_acc', self.val_accuracy, on_step=False, on_epoch=True,prog_bar=True)
         self.log('val_precision', self.val_precision, on_step=False, on_epoch=True,prog_bar=True)
         self.log('val_recall', self.val_recall, on_step=False, on_epoch=True,prog_bar=True)

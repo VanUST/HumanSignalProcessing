@@ -1,154 +1,135 @@
 import os
 import torch
-from torch.utils.data import Dataset, DataLoader, random_split
-import torch.nn.functional as F
+import glob
+from torch.utils.data import Dataset, DataLoader
 import lightning as L
 import numpy as np
-from audiomentations import Compose
-from preprocess_utils import parse_and_preprocess_csv  # Assuming you have a module for parsing CSV files
+import torch.nn.functional as F
 
-class USS_40khz_dataset(Dataset):
-    def __init__(self, directory, selected_numbers, num_points_to_read=2000,
-                 normalize=True, augmentations=None):
-        """
-        Initializes the dataset by parsing and preprocessing the CSV files,
-        and organizing them based on the selected numbers.
 
-        Args:
-            directory (str): Path to the directory containing CSV files.
-            selected_numbers (list of int): List of numbers to include in the dataset.
-            num_points_to_read (int): Maximum number of points to read from each file.
-            normalize (bool): Whether to normalize the time series data.
-            augmentations (Compose): Audiomentations Compose object with augmentations.
-        """
-        self.selected_numbers = selected_numbers
-        self.num_points_to_read = num_points_to_read
-        self.normalize = normalize
-        self.augmentations = augmentations
+class Dataset_40khz(Dataset):
+    def __init__(self, folder_names, mode='single_channel', transform=None):
 
-        # Parse and preprocess the data
-        self.grouped_data = self.parse_and_preprocess_csv(directory, num_points_to_read)
-
-        # Filter the data based on selected_numbers
-        self.selected_data = {}
-        for number in selected_numbers:
-            if number in self.grouped_data:
-                for class_id, arrays in self.grouped_data[number].items():
-                    if class_id not in self.selected_data:
-                        self.selected_data[class_id] = []
-                    self.selected_data[class_id].extend(arrays)
-            else:
-                print(f"Number {number} not found in the data. Skipping.")
-
-        if not self.selected_data:
-            raise ValueError("No data found for the selected numbers.")
-
-        # Create a sorted list of unique class_ids
-        self.class_ids = sorted(self.selected_data.keys())
-        self.class_to_idx = {class_id: idx for idx, class_id in enumerate(self.class_ids)}
-        self.num_classes = len(self.class_ids)
-
-        # Create a list of tuples (timeseries, class_idx)
-        self.data = []
-        for class_id, arrays in self.selected_data.items():
-            class_idx = self.class_to_idx[class_id]
-            for array in arrays:
-                self.data.append((array, class_idx))
-
-        print(f"Dataset initialized with {len(self.data)} samples across {self.num_classes} classes.")
-
-    def parse_and_preprocess_csv(self, directory, num_points_to_read):
-        # Implement your CSV parsing logic here
-        # For the purpose of this example, I'll assume you have a function in preprocess_utils
-        return parse_and_preprocess_csv(directory, num_points_to_read)
+        self.folder_names = folder_names
+        self.mode = mode
+        self.transform = transform
+        self.samples = []
+        self.labels = []
+        self._build_samples()
+        self._build_label_mapping()
+    
+    def _build_samples(self):
+        if self.mode == 'single_channel':
+            # Each sample is a single file
+            for folder_name in self.folder_names:
+                folder_path = os.path.join(folder_name)
+                files = glob.glob(os.path.join(folder_path, '*.txt'))
+                for file in files:
+                    basename = os.path.basename(file)
+                    # Extract 'jest' from filename
+                    jest = basename.split('_')[-1].split('.txt')[0]
+                    self.samples.append(file)
+                    self.labels.append(jest)
+        elif self.mode == 'full_channels':
+            # Group files with same 'jest' and 'try'
+            sample_dict = {}
+            for folder_name in self.folder_names:
+                folder_path = os.path.join(folder_name)
+                files = glob.glob(os.path.join(folder_path, '*.txt'))
+                for file in files:
+                    basename = os.path.basename(file)
+                    parts = basename.split('_')
+                    try_num = parts[2]
+                    jest = parts[-1].split('.txt')[0]
+                    key = (folder_name, jest, try_num)
+                    if key not in sample_dict:
+                        sample_dict[key] = []
+                    sample_dict[key].append(file)
+            for key, file_list in sample_dict.items():
+                self.samples.append(file_list)
+                self.labels.append(key[1])  # jest
+        else:
+            raise ValueError("Mode must be 'single_channel' or 'full_channels'")
+    
+    def _build_label_mapping(self):
+        # Create a mapping from label strings to integers
+        unique_labels = sorted(set(self.labels))
+        self.label_to_index = {label: idx for idx, label in enumerate(unique_labels)}
+        self.index_to_label = {idx: label for label, idx in self.label_to_index.items()}
+        self.integer_encoded_labels = [self.label_to_index[label] for label in self.labels]
+        self.num_classes = len(self.label_to_index)
 
     def __len__(self):
-        return len(self.data)
-
+        return len(self.samples)
+    
+    def _load_data(self, file):
+        with open(file, 'r') as f:
+            lines = f.readlines()
+        # Remove '$' and ';', then convert to float
+        data = [float(line.strip().replace('$', '').replace(';', '')) for line in lines if line.strip()]
+        return np.array(data,dtype=np.float32)
+    
     def __getitem__(self, idx):
+        if self.mode == 'single_channel':
+            file = self.samples[idx]
+            data = self._load_data(file)
+            integer_label = self.integer_encoded_labels[idx]
+            label = F.one_hot(torch.tensor(integer_label), num_classes=self.num_classes)
+            if self.transform:
+                data = self.transform(data,sample_rate = 40000)
+            return torch.tensor(data, dtype=torch.float32), label.to(dtype=torch.float32)
+        elif self.mode == 'full_channels':
+            files = self.samples[idx]
+            data_list = [self._load_data(file) for file in files]
+            data = np.stack(data_list, axis=0)
+            integer_label = self.integer_encoded_labels[idx]
+            label = F.one_hot(torch.tensor(integer_label), num_classes=self.num_classes)
+            if self.transform:
+                data = self.transform(data,sample_rate = 40000)
+            return torch.tensor(data, dtype=torch.float32), label.to(dtype=torch.float32)
 
-        timeseries, class_idx = self.data[idx]
-        timeseries = np.array(timeseries,dtype=np.float32)
+class Datamodule_40khz(L.LightningDataModule):
 
-        if self.normalize:
-            mean = timeseries.mean()
-            std = timeseries.std()
-            if std > 0:
-                timeseries = (timeseries - mean) / std
-
-        # Apply augmentations if any
-        if self.augmentations:
-            timeseries = self.augmentations(samples=timeseries,sample_rate = 40000)
-            timeseries = torch.tensor(timeseries, dtype=torch.float)
-
-        # One-hot encode the label
-        class_idx = torch.tensor(class_idx)
-        one_hot_label = F.one_hot(class_idx, num_classes=self.num_classes).float()
-
-        return one_hot_label, timeseries
-
-
-class USS_40khz_datamodule(L.LightningDataModule):
-    def __init__(self, data_dir: str, selected_numbers: list, batch_size: int = 32,
-                 num_points_to_read: int = 2000, num_workers: int = 4, normalize: bool = True,
-                 val_split: float = 0.2, augmentations=None):
-        """
-        PyTorch Lightning DataModule for USS_40khz_dataset.
-
-        Args:
-            data_dir (str): Path to the directory containing CSV files.
-            selected_numbers (list): List of numbers to include in the dataset.
-            batch_size (int, optional): Batch size for DataLoaders. Defaults to 32.
-            num_points_to_read (int, optional): Max points to read from each file. Defaults to 2000.
-            num_workers (int, optional): Number of subprocesses for data loading. Defaults to 4.
-            normalize (bool, optional): Whether to normalize the time series data. Defaults to True.
-            val_split (float, optional): Proportion of data to use for validation. Defaults to 0.2.
-            augmentations (Compose, optional): Audiomentations Compose object. Defaults to None.
-        """
+    def __init__(self, folder_names, train_val_split=0.8, batch_size=32, num_workers=0, mode='full_channels', transform=None):
         super().__init__()
-        self.data_dir = data_dir
-        self.selected_numbers = selected_numbers
+        self.folder_names = folder_names
+        self.train_val_split = train_val_split
         self.batch_size = batch_size
-        self.num_points_to_read = num_points_to_read
         self.num_workers = num_workers
-        self.normalize = normalize
-        self.val_split = val_split
-        self.augmentations = augmentations
+        self.mode = mode
+        self.transform = transform
+        full_dataset = Dataset_40khz(self.folder_names, mode=self.mode, transform=self.transform)
+        # Get labels
+        labels = full_dataset.integer_encoded_labels
+        # Perform stratified split
+        train_indices, val_indices = self._stratified_split(labels, self.train_val_split)
+        # Create subsets
+        self.train_dataset = torch.utils.data.Subset(full_dataset, train_indices)
+        self.val_dataset = torch.utils.data.Subset(full_dataset, val_indices)
+        
 
-        full_dataset = USS_40khz_dataset(
-            directory=self.data_dir,
-            selected_numbers=self.selected_numbers,
-            num_points_to_read=self.num_points_to_read,
-            normalize=self.normalize,
-            augmentations=self.augmentations
-        )
-
-        total_length = len(full_dataset)
-        val_length = int(total_length * self.val_split)
-        train_length = total_length - val_length
-
-        self.train_dataset, self.val_dataset = random_split(
-            full_dataset,
-            [train_length, val_length],
-            generator=torch.Generator().manual_seed(42)  # For reproducibility
-        )
-
-        print(f"Data splits: Train={train_length}, Val={val_length}")
+    def _stratified_split(self, labels, train_ratio):
+        from collections import defaultdict
+        import random
+        # Group indices by class label
+        label_to_indices = defaultdict(list)
+        for idx, label in enumerate(labels):
+            label_to_indices[label].append(idx)
+        # Split indices for each class
+        train_indices = []
+        val_indices = []
+        for label, indices in label_to_indices.items():
+            random.shuffle(indices)
+            split = int(train_ratio * len(indices))
+            train_indices.extend(indices[:split])
+            val_indices.extend(indices[split:])
+        # Shuffle the overall indices
+        random.shuffle(train_indices)
+        random.shuffle(val_indices)
+        return train_indices, val_indices
 
     def train_dataloader(self):
-        return DataLoader(
-            self.train_dataset,
-            batch_size=self.batch_size,
-            shuffle=True,
-            num_workers=self.num_workers,
-            pin_memory=True
-        )
-
+        return DataLoader(self.train_dataset, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
+    
     def val_dataloader(self):
-        return DataLoader(
-            self.val_dataset,
-            batch_size=self.batch_size,
-            shuffle=False,
-            num_workers=self.num_workers,
-            pin_memory=True
-        )
+        return DataLoader(self.val_dataset, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)

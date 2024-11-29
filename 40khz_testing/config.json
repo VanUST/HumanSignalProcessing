@@ -3,31 +3,34 @@
       "num_classes": 7,
       "wavelet_type": "db2",
       "wavelet_level": 2,
-      "conv_channels": [64],
-      "kernel_sizes": [3],
-      "num_conv_layers": 3,
-      "token_len": 1
+      "conv_channels": 32,
+      "kernel_size": 3,
+      "num_conv_layers": 4,
+      "token_len": 1,
+      "in_channels": 8,
+      "dropout": 0.5
     },
     "training": {
-      "learning_rate": 0.0009,
-      "batch_size": 16,
+      "learning_rate": 0.0005,
+      "batch_size": 7,
       "num_workers": 4,
-      "num_epochs": 100,
+      "num_epochs": -1,
       "weight_decay": 0.001,
       "amsgrad": false,
       "optimizer": "adamw",
       "tb_dir": "/home/giga_ivan/projects/HandyRobotics/40khz_testing/logs"
     },
     "data": {
-      "data_dir": "/home/giga_ivan/projects/HandyRobotics/40khz_testing/test_data_40khz",
-      "selected_numbers": [3],
-      "num_points_to_read": 2000,
-      "val_split": 0.0,
-      "normalize": true,
-      "augmentations": true
+      "folder_names": [
+                        "/home/giga_ivan/projects/HandyRobotics/40khz_testing/test_data_40khz/VAN"
+                        ],
+      "num_points_to_read": 1000,
+      "val_split": 0.75,
+      "augmentations": true,
+      "mode": "full_channels"
     },
     "ray_tune": {
-      "num_samples": 100,
+      "num_samples": 1000,
       "resources_per_trial": {
         "cpu": 1,
         "gpu": 0

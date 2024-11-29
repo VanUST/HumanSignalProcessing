@@ -6,7 +6,7 @@ def get_augmentations():
     """
     augment = Compose([
         AddGaussianNoise(p=0.99,max_amplitude=0.25),
-        TimeMask(p=0.25),
+        TimeMask(p=0.9),
         # Shift(p=0.5)
     ])
     return augment
